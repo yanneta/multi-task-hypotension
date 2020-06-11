@@ -10,6 +10,7 @@ import random
 import numpy as np
 import pickle
 
+PATH = Path("/data2/yinterian/multi-task-romain")
 
 def get_data_gap(PATH, gap="60min"):
     filename = "data_train_{gap}.pickle".format(gap=gap)
@@ -165,7 +166,7 @@ def val_metrics_map(model, valid_dl, C=10):
     r2 = metrics.r2_score(ys, y_hat)
     return sum_loss/total, r2
 
-def train_epochs_map(model, train_ds, optimizer, filename, lr=1e-3, epochs = 30):
+def train_epochs_map(model, train_ds, valid_dl, optimizer, filename, lr=1e-3, epochs = 30):
     prev_val_r2 = 0
     for i in range(epochs):
         sum_loss1 = 0
@@ -188,7 +189,7 @@ def train_epochs_map(model, train_ds, optimizer, filename, lr=1e-3, epochs = 30)
             loss.backward()
             optimizer.step()
         if i % 1 == 0:
-            val_loss, val_r2= val_metrics(model, valid_dl)
+            val_loss, val_r2= val_metrics_map(model, valid_dl)
             print("\tTrain loss: {:.3f} {:.3f} valid loss: {:.3f} valid r2 map {:.3f}".format(
                 sum_loss1/total, sum_loss2/total, val_loss, val_r2))
 
@@ -200,7 +201,7 @@ def train_epochs_map(model, train_ds, optimizer, filename, lr=1e-3, epochs = 30)
                 print(path)
     return prev_val_r2
 
-def train_epochs(model, train_ds, optimizer, filename, lr=1e-3, epochs = 30, C=10):
+def train_epochs(model, train_ds, valid_dl, optimizer, filename, lr=1e-3, epochs = 30, C=10):
     prev_val_r2 = 0
     for i in range(epochs):
         sum_loss1 = 0
@@ -238,22 +239,20 @@ def train_epochs(model, train_ds, optimizer, filename, lr=1e-3, epochs = 30, C=1
                 print(path)
     return prev_val_r2
 
-class EventModel3(nn.Module):
+class EventModel(nn.Module):
     def __init__(self, num_subjects, hidden_size=100, num2=50, single=False):
-        super(EventModel3, self).__init__()
+        super(EventModel, self).__init__()
         self.single = single
         self.embedding1 = nn.Embedding(5, 1)
         self.embedding2 = nn.Embedding(num_subjects+1, 5)
         
-        self.gru = nn.GRU(5, hidden_size, num_layers=2, batch_first=True,
-                          dropout=0.3)
+        self.gru = nn.GRU(5, hidden_size, num_layers=2, batch_first=True, dropout=0.3)
         self.num1 = hidden_size + 1 + 5 + 7
         self.num2 = num2
         self.linear1 = nn.Linear(self.num1, self.num2)
         self.linear2 = nn.Linear(self.num2, self.num2)
         self.out1 = nn.Linear(self.num2, 1)
-        if not self.single:
-            self.out2 = nn.Linear(self.num2, 1)
+        self.out2 = nn.Linear(self.num2, 1)
         self.bn1 = nn.BatchNorm1d(self.num2)
         self.bn2 = nn.BatchNorm1d(self.num2)
         
