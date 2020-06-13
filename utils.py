@@ -10,6 +10,8 @@ import random
 import numpy as np
 import pickle
 
+from tqdm import tqdm_notebook
+
 PATH = Path("/data2/yinterian/multi-task-romain")
 
 def get_data_gap(PATH, gap="60min"):
@@ -106,7 +108,7 @@ def update_optimizer(optimizer, lr):
     for i, param_group in enumerate(optimizer.param_groups):
         param_group["lr"] = lr
 
-def val_metrics(model, valid_dl):
+def val_metrics(model, valid_dl, C):
     model.eval()
     total = 0
     sum_loss = 0
@@ -135,74 +137,33 @@ def val_metrics(model, valid_dl):
     y_hat2 = np.concatenate(y_hat2)
     ys1 = np.concatenate(ys1)
     ys2 = np.concatenate(ys2)
-    r2_1 = metrics.r2_score(ys1, y_hat1)
+    r2_1 = 0
+    if C > 0:
+        r2_1 = metrics.r2_score(ys1, y_hat1)
     r2_2 = metrics.r2_score(ys2, y_hat2)
     return sum_loss/total, r2_1, r2_2
 
-# MAP only
-def val_metrics_map(model, valid_dl, C=10):
-    model.eval()
-    total = 0
-    sum_loss = 0
-    y_hat1 = []
-    ys1 = []
-    y_hat2 = []
-    ys2 = []
-    for x_series, x_cont, x_cat, y1, y2 in valid_dl:
-        batch = y1.shape[0]
-        x_series = x_series.float().cuda()
-        x_cont = x_cont.float().cuda()
-        x_cat = x_cat.long().cuda()
-        y2 = y2.float().cuda()
-        out = model(x_series, x_cont, x_cat)
-        loss = F.mse_loss(out, y2.unsqueeze(-1))
-        sum_loss += batch*(loss.item())
-        total += batch
-        y_hat2.append(out.view(-1).detach().cpu().numpy())
-        ys2.append(y2.view(-1).cpu().numpy())
+def cosine_segment(start_lr, end_lr, iterations):
+    i = np.arange(iterations)
+    c_i = 1 + np.cos(i*np.pi/iterations)
+    return end_lr + (start_lr - end_lr)/2 *c_i
 
-    y_hat = np.concatenate(y_hat2)
-    ys = np.concatenate(ys2)
-    r2 = metrics.r2_score(ys, y_hat)
-    return sum_loss/total, r2
+def get_cosine_triangular_lr(max_lr, iterations, div_start=2, div_end=5):
+    min_start, min_end = max_lr/div_start, max_lr/div_end
+    iter1 = int(0.3*iterations)
+    iter2 = iterations - iter1
+    segs = [cosine_segment(min_start, max_lr, iter1), cosine_segment(max_lr, min_end, iter2)]
+    return np.concatenate(segs)
 
-def train_epochs_map(model, train_ds, valid_dl, optimizer, filename, lr=1e-3, epochs = 30):
-    prev_val_r2 = 0
-    for i in range(epochs):
-        sum_loss1 = 0
-        sum_loss2 = 0
-        total = 0
-        train_ds.pick_a_sample()
-        train_dl = DataLoader(train_ds, batch_size=5000, shuffle=True)
-        for x_series, x_cont, x_cat, y1, y2 in train_dl:
-            model.train()
-            x_series = x_series.float().cuda()
-            x_cont = x_cont.float().cuda()
-            x_cat = x_cat.long().cuda()
-            y2 = y2.float().cuda()
-            out = model(x_series, x_cont, x_cat)
-            loss = F.mse_loss(out, y2.unsqueeze(-1))
 
-            sum_loss2 += len(y1) * loss.item()
-            total += len(y1)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-        if i % 1 == 0:
-            val_loss, val_r2= val_metrics_map(model, valid_dl)
-            print("\tTrain loss: {:.3f} {:.3f} valid loss: {:.3f} valid r2 map {:.3f}".format(
-                sum_loss1/total, sum_loss2/total, val_loss, val_r2))
 
-        if val_r2 > prev_val_r2:
-            prev_val_r2 = val_r2
-            if val_r2 > 0.7:
-                path = "{0}/models/{1}_r2_{2:.0f}.pth".format(PATH, filename, 100*val_r2)
-                save_model(model, path)
-                print(path)
-    return prev_val_r2
+def train_epochs(model, train_ds, valid_dl, optimizer, filename, prev_val_r2, max_lr=0.04, epochs = 30, C=1/15):
 
-def train_epochs(model, train_ds, valid_dl, optimizer, filename, lr=1e-3, epochs = 30, C=10):
-    prev_val_r2 = 0
+    idx = 0
+    train_dl = DataLoader(train_ds, batch_size=5000, shuffle=True)
+    iterations = epochs*len(train_dl)
+    pbar = tqdm_notebook(total=iterations)
+    lrs = get_cosine_triangular_lr(max_lr, iterations)
     for i in range(epochs):
         sum_loss1 = 0
         sum_loss2 = 0
@@ -219,17 +180,18 @@ def train_epochs(model, train_ds, valid_dl, optimizer, filename, lr=1e-3, epochs
             out1, out2 = model(x_series, x_cont, x_cat)
             mse_loss1 = F.mse_loss(out1, y1.unsqueeze(-1))
             mse_loss2 = F.mse_loss(out2, y2.unsqueeze(-1))
-            loss = mse_loss1/C + mse_loss2
-            sum_loss1 += len(y1) * mse_loss1.item()
+            loss = C*mse_loss1 + mse_loss2
+            sum_loss1 += len(y1) * mse_loss1.item()*int((C>0))
             sum_loss2 += len(y1) * mse_loss2.item()
             total += len(y1)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-        if i % 1 == 0:
-            val_loss, val_r2_1, val_r2_2 = val_metrics(model, valid_dl)
-            print("\tTrain loss: {:.3f} {:.3f} map valid loss: {:.3f} valid r2 hr {:.3f} valid r2 map {:.3f}".format(
-                sum_loss1/total, sum_loss2/total, val_loss, val_r2_1, val_r2_2))
+            idx +=1
+            pbar.update()
+        val_loss, val_r2_1, val_r2_2 = val_metrics(model, valid_dl, C)
+        print("\tTrain loss: {:.3f} {:.3f} map valid loss: {:.3f} valid r2 hr {:.3f} valid r2 map {:.3f}".format(
+            sum_loss1/total, sum_loss2/total, val_loss, val_r2_1, val_r2_2))
 
         if val_r2_2 > prev_val_r2:
             prev_val_r2 = val_r2_2
@@ -240,9 +202,8 @@ def train_epochs(model, train_ds, valid_dl, optimizer, filename, lr=1e-3, epochs
     return prev_val_r2
 
 class EventModel(nn.Module):
-    def __init__(self, num_subjects, hidden_size=100, num2=50, single=False):
+    def __init__(self, num_subjects, hidden_size=100, num2=50):
         super(EventModel, self).__init__()
-        self.single = single
         self.embedding1 = nn.Embedding(5, 1)
         self.embedding2 = nn.Embedding(num_subjects+1, 5)
         
@@ -263,10 +224,7 @@ class EventModel(nn.Module):
         x = torch.cat((ht[-1], x_cat_1, x_cat_2, x_cont), 1)
         x = self.bn1(F.relu(self.linear1(x)))
         x = self.bn2(F.relu(self.linear2(x)))
-        if self.single:
-            return self.out1(x)
-        else:
-            return self.out1(x), self.out2(x)
+        return self.out1(x), self.out2(x)
 
 
 
