@@ -157,7 +157,43 @@ def get_cosine_triangular_lr(max_lr, iterations, div_start=2, div_end=5):
 
 
 
-def train_epochs(model, train_ds, valid_dl, optimizer, filename, prev_val_r2, max_lr=0.04, epochs = 30, C=1/15):
+def train_mini_batch(model, optimiater, x_series, x_cont, x_cat, y1, y2, C):
+    out1, out2 = model(x_series, x_cont, x_cat)
+    mse_loss1 = F.mse_loss(out1, y1.unsqueeze(-1))
+    mse_loss2 = F.mse_loss(out2, y2.unsqueeze(-1))
+    loss = C*mse_loss1 + mse_loss2
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    return out1, out2, mse_loss1, mse_loss2
+
+def valid_saving(model, modelS, valid_dl, loss1, loss2, lossS, prev_val_r2, prev_val_r2S):
+    val_loss, val_r2_1, val_r2_2 = val_metrics(model, valid_dl, C)
+    val_lossS, _, val_r2 = val_metrics(modelS, valid_dl, 0)
+    print("\t Multi Train loss: {:.3f} {:.3f} map valid loss: {:.3f} valid r2 hr {:.3f} valid r2 map {:.3f}".format(
+        loss1, loss2, val_loss, val_r2_1, val_r2_2))
+    print("\t Single Train loss: {:.3f} map valid loss: {:.3f} valid r2 map {:.3f}".format(
+        lossS, val_lossS, val_r2))
+
+    if val_r2_2 > prev_val_r2:
+        prev_val_r2 = val_r2_2
+        if val_r2_2 > 0.7:
+            path = "{0}/models/{1}_r2_{2:.0f}_{3:.0f}.pth".format(PATH, filename, 100*val_r2_1, 100*val_r2_2)
+            save_model(model, path)
+            print(path)
+    if val_r2 > prev_val_r2S:
+        prev_val_r2S = val_r2
+        if val_r2 > 0.7:
+            path = "{0}/models/{1}_single_r2_{2:.0f}.pth".format(PATH, filename, 100*val_r2)
+            save_model(modelS, path)
+            print(path)
+    return prev_val_r2, prev_val_r2S
+
+
+
+
+def train_epochs(model, modelS, optimizer, optimizerS, train_ds, valid_dl, filename, prev_val_r2, prev_val_r2S,\
+        max_lr=0.04, epochs = 30, C=1/15):
 
     idx = 0
     train_dl = DataLoader(train_ds, batch_size=5000, shuffle=True)
@@ -165,41 +201,32 @@ def train_epochs(model, train_ds, valid_dl, optimizer, filename, prev_val_r2, ma
     pbar = tqdm_notebook(total=iterations)
     lrs = get_cosine_triangular_lr(max_lr, iterations)
     for i in range(epochs):
+        model.train()
+        modelS.train()
         sum_loss1 = 0
         sum_loss2 = 0
+        sum_lossS = 0
         total = 0
         train_ds.pick_a_sample()
         train_dl = DataLoader(train_ds, batch_size=5000, shuffle=True)
         for x_series, x_cont, x_cat, y1, y2 in train_dl:
-            model.train()
+            update_optimizer(optimizer, lrs[idx])
+            update_optimizer(optimizerS, lrs[idx])
             x_series = x_series.float().cuda()
             x_cont = x_cont.float().cuda()
             x_cat = x_cat.long().cuda()
             y1 = y1.float().cuda()
             y2 = y2.float().cuda()
-            out1, out2 = model(x_series, x_cont, x_cat)
-            mse_loss1 = F.mse_loss(out1, y1.unsqueeze(-1))
-            mse_loss2 = F.mse_loss(out2, y2.unsqueeze(-1))
-            loss = C*mse_loss1 + mse_loss2
-            sum_loss1 += len(y1) * mse_loss1.item()*int((C>0))
+            out1, out2, mse_loss1, mse_loss2 = train_mini_batch(model, optimiater, x_series, x_cont, x_cat, y1, y2, C)
+            _, out, _, mse_loss = train_mini_batch(modelS, optimiaterS, x_series, x_cont, x_cat, y1, y2, 0)
+            sum_loss1 += len(y1) * mse_loss1.item()
             sum_loss2 += len(y1) * mse_loss2.item()
+            sum_lossS += len(y1) * mse_loss.item()
             total += len(y1)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
             idx +=1
             pbar.update()
-        val_loss, val_r2_1, val_r2_2 = val_metrics(model, valid_dl, C)
-        print("\tTrain loss: {:.3f} {:.3f} map valid loss: {:.3f} valid r2 hr {:.3f} valid r2 map {:.3f}".format(
-            sum_loss1/total, sum_loss2/total, val_loss, val_r2_1, val_r2_2))
-
-        if val_r2_2 > prev_val_r2:
-            prev_val_r2 = val_r2_2
-            if val_r2_2 > 0.7:
-                path = "{0}/models/{1}_r2_{2:.0f}_{3:.0f}.pth".format(PATH, filename, 100*val_r2_1, 100*val_r2_2)
-                save_model(model, path)
-                print(path)
-    return prev_val_r2
+        prev_val_r2, prev_val_r2S = valid_saving(model, modelS, valid_dl, loss1, loss2, lossS, prev_val_r2, prev_val_r2S) 
+    return prev_val_r2, prev_val_r2S 
 
 class EventModel(nn.Module):
     def __init__(self, num_subjects, hidden_size=100, num2=50):
@@ -227,4 +254,28 @@ class EventModel(nn.Module):
         return self.out1(x), self.out2(x)
 
 
+class EventModel0(nn.Module):
+    def __init__(self, num_subjects, hidden_size=100, num2=50):
+        super(EventModel0, self).__init__()
+        self.embedding1 = nn.Embedding(5, 1)
+        self.embedding2 = nn.Embedding(num_subjects+1, 5)
+
+        self.gru = nn.GRU(5, hidden_size, num_layers=1, batch_first=True)
+        self.num1 = hidden_size + 1 + 5 + 7
+        self.num2 = num2
+        self.linear1 = nn.Linear(self.num1, self.num2)
+        self.linear2 = nn.Linear(self.num2, self.num2)
+        self.out1 = nn.Linear(self.num2, 1)
+        self.out2 = nn.Linear(self.num2, 1)
+        self.bn1 = nn.BatchNorm1d(self.num2)
+        self.bn2 = nn.BatchNorm1d(self.num2)
+
+    def forward(self, x_series, x_cont, x_cat):
+        _, ht = self.gru(x_series)
+        x_cat_1 = self.embedding1(x_cat[:,0])
+        x_cat_2 = self.embedding2(x_cat[:,1])
+        x = torch.cat((ht[-1], x_cat_1, x_cat_2, x_cont), 1)
+        x = self.bn1(F.relu(self.linear1(x)))
+        x = self.bn2(F.relu(self.linear2(x)))
+        return self.out1(x), self.out2(x)
 
