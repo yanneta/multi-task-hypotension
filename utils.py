@@ -157,7 +157,7 @@ def get_cosine_triangular_lr(max_lr, iterations, div_start=2, div_end=5):
 
 
 
-def train_mini_batch(model, optimiater, x_series, x_cont, x_cat, y1, y2, C):
+def train_mini_batch(model, optimizer, x_series, x_cont, x_cat, y1, y2, C):
     out1, out2 = model(x_series, x_cont, x_cat)
     mse_loss1 = F.mse_loss(out1, y1.unsqueeze(-1))
     mse_loss2 = F.mse_loss(out2, y2.unsqueeze(-1))
@@ -167,8 +167,8 @@ def train_mini_batch(model, optimiater, x_series, x_cont, x_cat, y1, y2, C):
     optimizer.step()
     return out1, out2, mse_loss1, mse_loss2
 
-def valid_saving(model, modelS, valid_dl, loss1, loss2, lossS, prev_val_r2, prev_val_r2S):
-    val_loss, val_r2_1, val_r2_2 = val_metrics(model, valid_dl, C)
+def valid_saving(model, modelS, valid_dl, loss1, loss2, lossS, prev_val_r2, prev_val_r2S, filename):
+    val_loss, val_r2_1, val_r2_2 = val_metrics(model, valid_dl, 1)
     val_lossS, _, val_r2 = val_metrics(modelS, valid_dl, 0)
     print("\t Multi Train loss: {:.3f} {:.3f} map valid loss: {:.3f} valid r2 hr {:.3f} valid r2 map {:.3f}".format(
         loss1, loss2, val_loss, val_r2_1, val_r2_2))
@@ -178,7 +178,7 @@ def valid_saving(model, modelS, valid_dl, loss1, loss2, lossS, prev_val_r2, prev
     if val_r2_2 > prev_val_r2:
         prev_val_r2 = val_r2_2
         if val_r2_2 > 0.7:
-            path = "{0}/models/{1}_r2_{2:.0f}_{3:.0f}.pth".format(PATH, filename, 100*val_r2_1, 100*val_r2_2)
+            path = "{0}/models/{1}_r2_{2:.0f}.pth".format(PATH, filename, 100*val_r2_2)
             save_model(model, path)
             print(path)
     if val_r2 > prev_val_r2S:
@@ -190,10 +190,8 @@ def valid_saving(model, modelS, valid_dl, loss1, loss2, lossS, prev_val_r2, prev
     return prev_val_r2, prev_val_r2S
 
 
-
-
 def train_epochs(model, modelS, optimizer, optimizerS, train_ds, valid_dl, filename, prev_val_r2, prev_val_r2S,\
-        max_lr=0.04, epochs = 30, C=1/15):
+        max_lr=0.04, epochs = 30, C=1/5):
 
     idx = 0
     train_dl = DataLoader(train_ds, batch_size=5000, shuffle=True)
@@ -217,15 +215,18 @@ def train_epochs(model, modelS, optimizer, optimizerS, train_ds, valid_dl, filen
             x_cat = x_cat.long().cuda()
             y1 = y1.float().cuda()
             y2 = y2.float().cuda()
-            out1, out2, mse_loss1, mse_loss2 = train_mini_batch(model, optimiater, x_series, x_cont, x_cat, y1, y2, C)
-            _, out, _, mse_loss = train_mini_batch(modelS, optimiaterS, x_series, x_cont, x_cat, y1, y2, 0)
+            out1, out2, mse_loss1, mse_loss2 = train_mini_batch(model, optimizer, x_series, x_cont, x_cat, y1, y2, C)
+            _, out, _, mse_loss = train_mini_batch(modelS, optimizerS, x_series, x_cont, x_cat, y1, y2, 0)
             sum_loss1 += len(y1) * mse_loss1.item()
             sum_loss2 += len(y1) * mse_loss2.item()
             sum_lossS += len(y1) * mse_loss.item()
             total += len(y1)
             idx +=1
             pbar.update()
-        prev_val_r2, prev_val_r2S = valid_saving(model, modelS, valid_dl, loss1, loss2, lossS, prev_val_r2, prev_val_r2S) 
+        loss1 = sum_loss1/total
+        loss2 = sum_loss2/total
+        lossS = sum_lossS/total
+        prev_val_r2, prev_val_r2S = valid_saving(model, modelS, valid_dl, loss1, loss2, lossS, prev_val_r2, prev_val_r2S, filename) 
     return prev_val_r2, prev_val_r2S 
 
 class EventModel(nn.Module):
